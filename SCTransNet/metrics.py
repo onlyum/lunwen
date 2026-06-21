@@ -87,6 +87,19 @@ class PD_FA():
         self.PD = 0
         self.target = 0
 
+    def _area_from_size(self, size):
+        if isinstance(size, (list, tuple)):
+            h, w = size[0], size[1]
+            if isinstance(h, torch.Tensor):
+                h = int(h.item())
+            if isinstance(w, torch.Tensor):
+                w = int(w.item())
+            return int(h) * int(w)
+        if isinstance(size, torch.Tensor):
+            flat = size.reshape(-1).tolist()
+            return int(flat[0]) * int(flat[1])
+        return int(size)
+
     def update(self, preds, labels, size):
         predits = np.array((preds).cpu()).astype('int64')
         labelss = np.array((labels).cpu()).astype('int64')
@@ -121,13 +134,14 @@ class PD_FA():
 
         self.dismatch = [x for x in self.image_area_total if x not in self.image_area_match] # 在image里面 但是不在label里面
         self.dismatch_pixel += np.sum(self.dismatch)  # Fa 虚警
-        self.all_pixel += size[0] * size[1]
+        self.all_pixel += self._area_from_size(size)
         self.PD += len(self.distance_match)  # 如果中心点之间距离在3一下 就算Pd  所以Pd 是匹配上了的目标的个数
 
     def get(self):
-        Final_FA = self.dismatch_pixel / self.all_pixel
-        Final_PD = self.PD / self.target
-        return Final_PD, float(Final_FA.cpu().detach().numpy())
+        all_pixel = float(self.all_pixel)
+        Final_FA = float(self.dismatch_pixel) / (all_pixel + np.spacing(1))
+        Final_PD = float(self.PD) / (float(self.target) + np.spacing(1))
+        return Final_PD, Final_FA
 
     def reset(self):
         self.FA = np.zeros([self.bins + 1])
