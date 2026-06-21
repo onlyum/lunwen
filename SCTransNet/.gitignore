@@ -1,0 +1,77 @@
+# Python cache and local tooling
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Virtual environments and local config
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Datasets and local data
+datasets/
+data/
+test_data/
+train_data/
+val_data/
+*.lnk
+
+# Training logs, intermediate outputs, and experiment artifacts
+log/
+otherlogs/
+records/
+run_logs/
+logs/
+runs/
+outputs/
+output/
+results/
+result/
+experiments/
+work_dirs/
+Fig/
+*.log
+*.out
+*.err
+
+# Model checkpoints and exported weights
+checkpoints/
+checkpoint/
+weights/
+saved_models/
+model_weights/
+*.pth
+*.pth.tar
+*.pt
+*.ckpt
+*.onnx
+*.engine
+*.pkl
+*.pickle
+
+# Numeric arrays and scientific data dumps
+*.npy
+*.npz
+*.mat
+*.h5
+*.hdf5
+
+# Generated media/result files
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tif
+*.tiff
+*.gif
+
+# Local experiment notes
+experiment_records.md
+后续修改思路.md
+另一复现方式.md
