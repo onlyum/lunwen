@@ -29,10 +29,17 @@ parser.add_argument("--dataset_names", default='DenseSIRST', type=str)
 parser.add_argument("--experiment_name", default=None, type=str)
 parser.add_argument("--optimizer_name", default='Adam', type=str, help="optimizer name: AdamW, Adam, Adagrad, SGD")
 parser.add_argument("--epochs", default=1000, type=int)
-parser.add_argument("--begin_val", default=1, type=int)
-parser.add_argument("--val_interval", default=1, type=int)
+parser.add_argument("--begin_val", default=10, type=int,
+                    help='First epoch to run validation')
+parser.add_argument("--val_interval", default=10, type=int,
+                    help='Validate every N epochs (quick subset by default)')
 parser.add_argument("--every_test", default=None, type=int, help="Deprecated alias for --val_interval")
-parser.add_argument("--test_interval", default=5, type=int)
+parser.add_argument("--test_interval", default=50, type=int,
+                    help='Run full test split every N epochs (0=off)')
+parser.add_argument("--val_max_samples", default=64, type=int,
+                    help='Quick val subset size; 0 means always use full split')
+parser.add_argument("--full_val_interval", default=50, type=int,
+                    help='Run full val and update best checkpoint every N epochs')
 parser.add_argument("--every_save_pth", default=1000, type=int)
 parser.add_argument("--every_print", default=1, type=int)
 parser.add_argument("--dataset_dir", default=r'./datasets')
@@ -62,9 +69,10 @@ parser.add_argument("--pos_weight", default=50.0, type=float,
 parser.add_argument("--tversky_alpha", default=0.7, type=float)
 parser.add_argument("--tversky_beta", default=0.3, type=float)
 parser.add_argument("--focal_gamma", default=0.75, type=float)
-parser.add_argument("--viz_interval", default=50, type=int, help='Save val viz every N epochs (0=off)')
+parser.add_argument("--viz_interval", default=0, type=int,
+                    help='Save val viz every N full-val epochs (0=off)')
 parser.add_argument("--threshold_sweep_interval", default=0, type=int,
-                    help='Run threshold sweep every N epochs on val (0=off)')
+                    help='Run threshold sweep every N epochs on full val only (0=off)')
 parser.add_argument("--progress", action='store_true', default=True, help='Show tqdm progress bars')
 parser.add_argument("--use_prior", action='store_true')
 parser.add_argument("--prior_gamma_init", default=0.0, type=float)
@@ -176,8 +184,8 @@ def _init_epoch_metrics_file():
     with open(path, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow([
-            'epoch', 'train_loss', 'lr', 'val_loss', 'val_mIoU', 'val_PD', 'val_FA',
-            'val_pred_fg_ratio', 'val_gt_fg_ratio', 'val_pred_cc', 'val_gt_cc',
+            'epoch', 'train_loss', 'lr', 'val_mode', 'val_samples', 'val_loss', 'val_mIoU', 'val_PD', 'val_FA',
+            'val_pred_fg_ratio', 'val_gt_fg_ratio', 'val_pred_cc', 'val_gt_cc', 'best_updated',
         ])
     return path
 
@@ -317,11 +325,38 @@ def _append_record(epoch, split, loss_value, results1, results2, lr=None, extra=
         ])
 
 
-def _evaluate_split(net, split_name, phase, epoch, writer, tag, lr=None, save_viz=False):
+def _is_full_validation(epoch):
+    if opt.val_max_samples <= 0:
+        return True
+    if opt.full_val_interval <= 0:
+        return False
+    return epoch % opt.full_val_interval == 0
+
+
+def _should_validate(epoch):
+    return epoch >= opt.begin_val and epoch % opt.val_interval == 0
+
+
+def _should_run_threshold_sweep(epoch, is_full_val):
+    return (
+        is_full_val and
+        opt.threshold_sweep_interval > 0 and
+        epoch % opt.threshold_sweep_interval == 0
+    )
+
+
+def _make_eval_loader(split_name, phase, max_samples=0):
     eval_set = TestSetLoader(opt.dataset_dir, opt.dataset_name, opt.dataset_name,
                              img_norm_cfg=opt.img_norm_cfg,
                              split_name=split_name, phase=phase)
-    eval_loader = DataLoader(dataset=eval_set, num_workers=0, batch_size=1, shuffle=False)
+    total = len(eval_set.test_list)
+    if max_samples > 0:
+        eval_set.test_list = eval_set.test_list[:max_samples]
+    return DataLoader(dataset=eval_set, num_workers=0, batch_size=1, shuffle=False), len(eval_set), total
+
+
+def _evaluate_split(net, split_name, phase, epoch, writer, tag, lr=None, save_viz=False, max_samples=0):
+    eval_loader, n_eval, n_total = _make_eval_loader(split_name, phase, max_samples=max_samples)
     was_training = net.training
     net.eval()
     pred_fg_list, gt_fg_list, pred_cc_list, gt_cc_list = [], [], [], []
@@ -370,7 +405,7 @@ def _evaluate_split(net, split_name, phase, epoch, writer, tag, lr=None, save_vi
         writer.add_scalar(f'{tag}_gt_cc', extra['gt_cc'], epoch)
 
     log = (
-        f'{tag.upper()}_RECORD Epoch---{epoch}, {tag}_loss---{loss_value:.6f}, '
+        f'{tag.upper()}_RECORD Epoch---{epoch}, samples---{n_eval}/{n_total}, {tag}_loss---{loss_value:.6f}, '
         f'pixAcc---{_as_float(results1[0]):.6f}, mIoU---{_as_float(results1[1]):.6f}, '
         f'PD---{_as_float(results2[0]):.6f}, FA---{_as_float(results2[1]):.6f}, '
         f'pred_fg---{extra["pred_fg_ratio"]:.6f}, gt_fg---{extra["gt_fg_ratio"]:.6f}, '
@@ -388,6 +423,8 @@ def _evaluate_split(net, split_name, phase, epoch, writer, tag, lr=None, save_vi
 
     if was_training:
         net.train()
+    extra['n_eval'] = n_eval
+    extra['n_total'] = n_total
     return results1, results2, loss_value, extra
 
 
@@ -443,7 +480,14 @@ def train():
     best_Pd = (0.0, 0.0)
     best_epoch = 0
     epochs_without_improve = 0
-    val_loader_cache = None
+    full_val_loader_cache = None
+
+    opt.f.write(
+        f'val schedule: begin={opt.begin_val}, interval={opt.val_interval}, '
+        f'quick_samples={opt.val_max_samples}, full_every={opt.full_val_interval}, '
+        f'test_every={opt.test_interval}, sweep_every={opt.threshold_sweep_interval}\n'
+    )
+    opt.f.flush()
 
     epoch_bar = tqdm(range(epoch_state, opt.nEpochs), desc='epochs', dynamic_ncols=True) if opt.progress else range(epoch_state, opt.nEpochs)
     for idx_epoch in epoch_bar:
@@ -479,31 +523,23 @@ def train():
             writer.add_scalar('loss', train_loss, epoch)
             writer.add_scalar('lr', lr, epoch)
 
-        should_val = epoch >= opt.begin_val and epoch % opt.val_interval == 0
+        should_val = _should_validate(epoch)
         val_extra = {}
         if should_val:
-            save_viz = opt.viz_interval > 0 and epoch % opt.viz_interval == 0
+            is_full_val = _is_full_validation(epoch)
+            max_samples = 0 if is_full_val else opt.val_max_samples
+            val_tag = 'val' if is_full_val else 'val_quick'
+            save_viz = is_full_val and opt.viz_interval > 0 and epoch % opt.viz_interval == 0
             results1, results2, val_loss, val_extra = _evaluate_split(
-                net, opt.val_split, 'val', epoch, writer, 'val', lr, save_viz=save_viz)
-            _append_epoch_metrics(epoch_metrics_path, [
-                epoch, train_loss if epoch % opt.every_print == 0 else '',
-                lr, val_loss, _as_float(results1[1]), _as_float(results2[0]), _as_float(results2[1]),
-                val_extra.get('pred_fg_ratio', ''), val_extra.get('gt_fg_ratio', ''),
-                val_extra.get('pred_cc', ''), val_extra.get('gt_cc', ''),
-            ])
-            if opt.progress and hasattr(epoch_bar, 'set_postfix'):
-                epoch_bar.set_postfix(
-                    loss=f'{train_loss:.3f}' if epoch % opt.every_print == 0 else '-',
-                    mIoU=f'{_as_float(results1[1]):.4f}',
-                    PD=f'{_as_float(results2[0]):.3f}',
-                    pred_fg=f'{val_extra.get("pred_fg_ratio", 0):.5f}',
-                    refresh=False,
-                )
-            if _as_float(results1[1]) > _as_float(best_mIOU[1]):
+                net, opt.val_split, 'val', epoch, writer, val_tag, lr,
+                save_viz=save_viz, max_samples=max_samples)
+            best_updated = False
+            if is_full_val and _as_float(results1[1]) > _as_float(best_mIOU[1]):
                 best_mIOU = results1
                 best_Pd = results2
                 best_epoch = epoch
                 epochs_without_improve = 0
+                best_updated = True
                 print('------save the best model epoch', opt.model_name, '_%d ------' % epoch, flush=True)
                 opt.f.write("the best model epoch \t" + str(epoch) + '\n')
                 print("pixAcc, mIoU:\t" + str(best_mIOU), flush=True)
@@ -521,20 +557,45 @@ def train():
                     'loss_mode': opt.loss_mode,
                     'threshold': opt.threshold,
                 }, save_pth)
-                if opt.threshold_sweep_interval > 0:
-                    if val_loader_cache is None:
-                        val_set = TestSetLoader(opt.dataset_dir, opt.dataset_name, opt.dataset_name,
-                                                img_norm_cfg=opt.img_norm_cfg,
-                                                split_name=opt.val_split, phase='val')
-                        val_loader_cache = DataLoader(val_set, batch_size=1, shuffle=False, num_workers=0)
-                    _run_threshold_sweep(net, val_loader_cache,
-                                         [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-                                         'val', epoch)
-            else:
+            elif is_full_val:
                 epochs_without_improve += 1
 
+            if _should_run_threshold_sweep(epoch, is_full_val):
+                if full_val_loader_cache is None:
+                    full_val_loader_cache, _, _ = _make_eval_loader(opt.val_split, 'val', max_samples=0)
+                _run_threshold_sweep(
+                    net, full_val_loader_cache,
+                    [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+                    'val', epoch)
+
+            _append_epoch_metrics(epoch_metrics_path, [
+                epoch,
+                train_loss if epoch % opt.every_print == 0 else '',
+                lr,
+                'full' if is_full_val else 'quick',
+                val_extra.get('n_eval', ''),
+                val_loss,
+                _as_float(results1[1]),
+                _as_float(results2[0]),
+                _as_float(results2[1]),
+                val_extra.get('pred_fg_ratio', ''),
+                val_extra.get('gt_fg_ratio', ''),
+                val_extra.get('pred_cc', ''),
+                val_extra.get('gt_cc', ''),
+                int(best_updated),
+            ])
+            if opt.progress and hasattr(epoch_bar, 'set_postfix'):
+                epoch_bar.set_postfix(
+                    loss=f'{train_loss:.3f}' if train_loss is not None else '-',
+                    val=val_tag,
+                    mIoU=f'{_as_float(results1[1]):.4f}',
+                    PD=f'{_as_float(results2[0]):.3f}',
+                    pred_fg=f'{val_extra.get("pred_fg_ratio", 0):.5f}',
+                    refresh=False,
+                )
+
         if opt.test_interval > 0 and epoch % opt.test_interval == 0:
-            _evaluate_split(net, opt.test_split, 'test', epoch, writer, 'test', lr)
+            _evaluate_split(net, opt.test_split, 'test', epoch, writer, 'test', lr, max_samples=0)
 
         if epoch % opt.every_save_pth == 0:
             save_pth = os.path.join(opt.run_save_dir, opt.model_name + '_' + str(epoch) + '.pth.tar')
@@ -545,8 +606,8 @@ def train():
                 'experiment_name': opt.run_name,
             }, save_pth)
 
-        if (should_val and opt.early_stop_patience > 0 and epoch >= opt.min_epochs
-                and epochs_without_improve >= opt.early_stop_patience):
+        if (should_val and _is_full_validation(epoch) and opt.early_stop_patience > 0
+                and epoch >= opt.min_epochs and epochs_without_improve >= opt.early_stop_patience):
             stop_log = (
                 f'EARLY_STOP Epoch---{epoch}, best_epoch---{best_epoch}, '
                 f'best_mIoU---{_as_float(best_mIOU[1]):.6f}, patience---{opt.early_stop_patience}'
