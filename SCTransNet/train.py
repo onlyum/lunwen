@@ -29,16 +29,16 @@ parser.add_argument("--dataset_names", default='DenseSIRST', type=str)
 parser.add_argument("--experiment_name", default=None, type=str)
 parser.add_argument("--optimizer_name", default='Adam', type=str, help="optimizer name: AdamW, Adam, Adagrad, SGD")
 parser.add_argument("--epochs", default=1000, type=int)
-parser.add_argument("--begin_val", default=10, type=int,
+parser.add_argument("--begin_val", default=500, type=int,
                     help='First epoch to run validation')
 parser.add_argument("--val_interval", default=10, type=int,
-                    help='Validate every N epochs (quick subset by default)')
+                    help='Validate every N epochs')
 parser.add_argument("--every_test", default=None, type=int, help="Deprecated alias for --val_interval")
 parser.add_argument("--test_interval", default=50, type=int,
                     help='Run full test split every N epochs (0=off)')
-parser.add_argument("--val_max_samples", default=64, type=int,
+parser.add_argument("--val_max_samples", default=0, type=int,
                     help='Quick val subset size; 0 means always use full split')
-parser.add_argument("--full_val_interval", default=50, type=int,
+parser.add_argument("--full_val_interval", default=1, type=int,
                     help='Run full val and update best checkpoint every N epochs')
 parser.add_argument("--every_save_pth", default=1000, type=int)
 parser.add_argument("--every_print", default=1, type=int)
